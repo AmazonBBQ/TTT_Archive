@@ -30,6 +30,7 @@ However, this is not a normal file—it is a Decompression Bomb (Brotli Bomb). T
 **Step-by-Step Solution**
 
 Step 1: Extracting the Bomb
+
 We need to extract the raw, compressed payload without letting any program decompress it yet.
 
 Locate the HTTP/1.1 200 OK response packet.
@@ -41,6 +42,7 @@ Right-click the data node and select Export Packet Bytes....
 Save the file as flag.br.
 
 Step 2: The Naive Approach (And Why It Fails)
+
 If we try to decompress this file normally, we hit a wall:
 
 Attempt 1: Writing to disk
@@ -58,6 +60,7 @@ zsh: killed      grep --color=auto -aoE 'BCCTF\{[^}]+\}'
 Reason: grep reads text line-by-line, looking for newline (\n) characters. A decompression bomb is typically filled with endless NULL bytes or spaces without a single newline. grep ends up buffering gigabytes of data into RAM trying to find a complete "line", triggering the Linux OOM (Out Of Memory) killer.
 
 Step 3: The Safe Extraction (Streaming & Chunking)
+
 To defeat the bomb, we must enforce a strict memory limit. We can use the system's brotli command to decompress the stream, pipe it (|), and use a Python script to ingest the stream in fixed 4KB chunks.
 
 Because of how OS pipes work, if Python reads the data slowly, the OS will block the brotli process from decompressing further, preventing both CPU and RAM exhaustion.
