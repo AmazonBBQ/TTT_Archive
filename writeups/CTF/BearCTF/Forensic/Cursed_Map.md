@@ -27,9 +27,9 @@ The server responds with an ~840KB file compressed using the Brotli (br) algorit
 
 However, this is not a normal file—it is a Decompression Bomb (Brotli Bomb). The 840KB payload expands to dozens or hundreds of gigabytes of junk data. When Wireshark attempts to decompress it in memory, it instantly exhausts system resources and crashes.
 
-**Step-by-Step Solution**
+**Step-by-Step Solution**  
 
-Step 1: Extracting the Bomb
+Step 1: Extracting the Bomb  
 
 We need to extract the raw, compressed payload without letting any program decompress it yet.
 
@@ -41,7 +41,7 @@ Right-click the data node and select Export Packet Bytes....
 
 Save the file as flag.br.
 
-Step 2: The Naive Approach (And Why It Fails)
+Step 2: The Naive Approach (And Why It Fails)  
 
 If we try to decompress this file normally, we hit a wall:
 
