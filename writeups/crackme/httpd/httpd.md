@@ -313,5 +313,3 @@ key = c2c5400040019a27c6de5fe53713f95c
 pt = b'CMO{fUn_w1th_m4g1c_p4ck3t5}\x05\x05\x05\x05\x05'
 pt_str = CMO{fUn_w1th_m4g1c_p4ck3t5}
 ```
-
-Write an offline solver: stable, reproducible, GitHub-friendly.
