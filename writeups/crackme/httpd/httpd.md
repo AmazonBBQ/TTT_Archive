@@ -1,79 +1,222 @@
-# httpd (FreeBSD Go ELF) — Packet-triggered AES-CBC Decryption (Write-up)
+# httpd (FreeBSD Go ELF) — Beginner Walkthrough: From Recon to Packet-Triggered Decryption
 
-## TL;DR
-The binary masquerades as a harmless `httpd` listening on `:8080`, but its real logic is a packet sniffer:
-it captures ICMP packets via `pcap`, checks for a specific “magic” Echo Request, derives a 16-byte AES key from
-selected header fields, decrypts a hard-coded 32-byte ciphertext using AES-CBC (IV = key), and prints the plaintext
-(flag) to stdout.
+> **Goal**: Understand what the suspicious `httpd` binary does and extract the flag by reproducing its logic offline.
 
 ---
 
-## 1. Initial Triage
-### 1.1 Why it does not run on Linux
-`file httpd` reports a **FreeBSD** ELF with interpreter `/libexec/ld-elf.so.1`.  
-Linux cannot execute FreeBSD binaries, so `execve()` fails with `ENOENT`.
+## Table of Contents
 
-### 1.2 Quick hints from metadata
-- Go binary with debug info (not stripped): easy to follow symbols in Ghidra.
-- Imports include `github.com/google/gopacket/pcap` / `gopacket/layers` → likely packet capture / protocol parsing.
-
----
-
-## 2. The Decoy: HTTP Server
-In `main.main` the program starts a server on `:8080` and registers exactly one route:
-- `HandleFunc("/", main.handler)`
-
-`main.handler` is intentionally boring:
-- If `r.Method == "GET"` it writes a fixed string to the response.
-- Otherwise it calls `http.Error`.
-
-This is a distraction. The real payload is not in the HTTP handler.
-
----
-
-## 3. The Real Payload: Sniff → Match → Decrypt (in init)
-The interesting code is executed during initialization (observed in the function labeled `net/http.init` by Ghidra).
-It performs the following steps:
-
-### 3.1 Open a live capture and set a BPF filter
-- `pcap.OpenLive(device, snaplen=0x640, promisc=true, timeout=...)`
-- `handle.SetBPFFilter("icmp")` (length 4 strongly indicates `"icmp"`)
-
-Then it creates a `gopacket.PacketSource`, calls `.Packets()`, and receives packets in a loop from a channel.
-
-### 3.2 Packet trigger conditions
-The code checks raw packet bytes at fixed offsets (Ethernet + IPv4 assumed) and requires:
-
-- `pkt[0x22] == 0x08`  
-  ICMP type = Echo Request
-- `u16(pkt[0x26:0x28], little) == 0x1337`  
-  ICMP identifier
-- `u16(pkt[0x10:0x12], big) == 0x0020`  
-  IPv4 total length == 0x20
-- `u32(pkt[0x2a:0x2e], little) == 0xE55FDEC6`  
-  4-byte “magic” payload marker
-
-Only if all conditions match does decryption occur.
+- [0) Recon: what is this binary and why won’t it run?](#0-recon-what-is-this-binary-and-why-wont-it-run)
+  - [0.1 Files](#01-files)
+  - [0.2 Identify platform](#02-identify-platform)
+  - [0.3 Why Linux says “No such file or directory”】【#03-why-linux-says-no-such-file-or-directory)
+- [1) First look in Ghidra: find the “obvious behavior”](#1-first-look-in-ghidra-find-the-obvious-behavior)
+  - [1.1 Locate `main.main`](#11-locate-mainmain)
+  - [1.2 A tiny HTTP server](#12-a-tiny-http-server)
+  - [1.3 The handler is boring](#13-the-handler-is-boring)
+- [2) Don’t brute-force `runtime.newproc`: use high-signal anchors](#2-dont-brute-force-runtimenewproc-use-high-signal-anchors)
+- [3) Backtrack via crypto: find the real logic](#3-backtrack-via-crypto-find-the-real-logic)
+  - [3.1 Pick “rare” crypto APIs](#31-pick-rare-crypto-apis)
+  - [3.2 XREF `NewCBCDecrypter`](#32-xref-newcbcdecrypter)
+- [4) Payload overview: sniff → match → derive key → decrypt → print](#4-payload-overview-sniff--match--derive-key--decrypt--print)
+  - [4.1 Packet capture setup (pcap)](#41-packet-capture-setup-pcap)
+  - [4.2 Trigger conditions (raw offsets)](#42-trigger-conditions-raw-offsets)
+- [5) Extract the ciphertext (CT)](#5-extract-the-ciphertext-ct)
+- [6) Recover key derivation (exact 16-byte layout)](#6-recover-key-derivation-exact-16-byte-layout)
+- [7) Offline solver](#7-offline-solver)
+- [8) What to remember for similar challenges](#8-what-to-remember-for-similar-challenges)
+- [Final note](#final-note)
 
 ---
 
-## 4. Cryptography: AES-CBC with IV = key
-### 4.1 Hard-coded ciphertext (CT)
-A 32-byte buffer is allocated and filled with four 64-bit constants, which form the ciphertext.
-Interpreting each constant as little-endian bytes yields:
+## 0) Recon: what is this binary and why won’t it run?
 
-```python
+### 0.1 Files
+
+We are given:
+
+- `httpd` (binary)
+- `README.md`: “found on an infected host”
+
+### 0.2 Identify platform
+
+```bash
+file httpd
+
+Observed traits:
+
+ELF 64-bit for FreeBSD
+
+interpreter: /libexec/ld-elf.so.1
+
+Go BuildID + debug_info, not stripped
+
+0.3 Why Linux says “No such file or directory”
+
+On Linux, running it gives:
+
+zsh: no such file or directory
+
+strace: execve(...)= -1 ENOENT
+
+This is a classic wrong-ABI symptom: Linux can’t execute a FreeBSD ELF, and the interpreter path (/libexec/ld-elf.so.1) doesn’t exist on Linux.
+
+✅ Conclusion: Start with static analysis (Ghidra). Optionally run it later in a FreeBSD VM.
+
+1) First look in Ghidra: find the “obvious behavior”
+1.1 Locate main.main
+
+Because it’s Go with debug info, you usually get useful names:
+
+main.main
+
+main.handler
+
+many init functions
+
+1.2 A tiny HTTP server
+
+We quickly spot:
+
+listens on :8080
+
+registers route / → main.handler
+
+prints Starting server...
+
+At this stage it looks like a toy web server.
+
+1.3 The handler is boring
+
+main.handler(ResponseWriter, *Request) is also simple:
+
+if Method == "GET": io.WriteString(w, s)
+
+else: http.Error(...)
+
+✅ Conclusion: The visible HTTP surface is decoy-ish and doesn’t explain “infected host”.
+
+So: where’s the real payload?
+
+2) Don’t brute-force runtime.newproc: use high-signal anchors
+
+In Go binaries, scanning runtime.newproc is noisy (stdlib spawns goroutines everywhere).
+
+A beginner-friendly approach:
+
+pick one suspicious capability (crypto / pcap / exec / exfil)
+
+follow references backwards to custom logic
+
+Here we already saw gopacket strings (SSID-ish strings in .rodata), suggesting packet capture.
+Also, “infected host” malware patterns often include:
+
+sniffing traffic
+
+decrypting only after a trigger packet
+
+So we focus on pcap + crypto.
+
+3) Backtrack via crypto: find the real logic
+3.1 Pick “rare” crypto APIs
+
+AES internals like aesCipher.Encrypt are too generic.
+
+Instead, search higher-level API calls that appear less frequently:
+
+crypto/aes.NewCipher
+
+crypto/cipher.NewCBCDecrypter
+
+crypto/cipher.(*cbcDecrypter).CryptBlocks
+
+3.2 XREF NewCBCDecrypter
+
+In Ghidra:
+
+open crypto/cipher.NewCBCDecrypter
+
+right-click → References / XREF
+
+Instead of only standard library callers, we find a call path inside a function (often mislabeled as something init-ish like net/http.init). The important part is what it does:
+
+calls pcap.OpenLive
+
+loops over packets
+
+constructs a key
+
+decrypts a constant ciphertext
+
+prints the plaintext
+
+✅ This is the real payload.
+
+4) Payload overview: sniff → match → derive key → decrypt → print
+4.1 Packet capture setup (pcap)
+
+Inside the init-like function:
+
+pcap.OpenLive(device, snaplen=0x640, promisc=true, timeout=...)
+
+handle.SetBPFFilter(...)
+
+The filter string length is 4, strongly suggesting "icmp" (and behavior matches: it processes ICMP Echo packets).
+
+Then it:
+
+builds a gopacket.PacketSource
+
+calls .Packets() to get a channel
+
+uses chanrecv2 loop to receive packets
+
+So: it’s a live sniffer.
+
+4.2 Trigger conditions (raw offsets)
+
+Before decrypting, it checks fixed offsets in the raw packet buffer (Ethernet + IPv4 assumed). Key checks:
+
+pkt[0x22] == 0x08
+ICMP Type == Echo Request
+
+u16_le(pkt[0x26:0x28]) == 0x1337
+ICMP Identifier
+
+u16_be(pkt[0x10:0x12]) == 0x0020
+IPv4 Total Length == 0x20
+
+u32_le(pkt[0x2a:0x2e]) == 0xE55FDEC6
+magic value inside ICMP data
+
+Only if all are satisfied does the program proceed to decryption.
+
+5) Extract the ciphertext (CT)
+
+The code allocates a 32-byte buffer and fills it with four 64-bit constants.
+
+Interpreting those qwords as little-endian bytes yields:
+
 CT = bytes([
     0x51, 0xF1, 0xA5, 0x29, 0xB4, 0xDF, 0x7E, 0xC0,
     0x2A, 0x3B, 0x2F, 0x8F, 0x24, 0x3D, 0x4E, 0xB3,
     0x5A, 0xED, 0xB0, 0xCF, 0x0B, 0x9C, 0xDD, 0x8C,
     0xCD, 0xE6, 0x0E, 0x9B, 0x3E, 0xC4, 0x64, 0x0C
 ])
-4.2 Key derivation (16 bytes)
 
-Assembly shows the key is constructed by writing specific fields into fixed offsets:
+This is the ciphertext input to AES-CBC.
 
-key[0:2] = bswap16(upper16(magic) XOR icmp_checksum_le)
+6) Recover key derivation (exact 16-byte layout)
+
+This part becomes mechanical and beginner-friendly:
+
+When you see assembly stores like MOV [RAX+0x8], EBX, you can map them directly:
+
+key[8:12] = ...
+
+From the stores, key layout is:
+
+key[0:2] = bswap16( upper16(magic) XOR icmp_checksum_le )
 
 key[2:6] = pkt[0x14:0x18] (4 bytes)
 
@@ -83,38 +226,46 @@ key[8:12] = pkt[0x2a:0x2e] (magic, little-endian)
 
 key[12:14]= pkt[0x26:0x28] (ICMP id, little-endian)
 
-key[14:16]= bswap16(icmp_checksum_le XOR lower16(magic))
+key[14:16]= bswap16( icmp_checksum_le XOR lower16(magic) )
 
-Then:
+Then the binary calls:
 
 aes.NewCipher(key)
 
-cipher.NewCBCDecrypter(block, iv) where len(iv)=16 and iv is derived from the same key bytes (IV = key)
+cipher.NewCBCDecrypter(block, iv) where iv == key
 
 CryptBlocks(pt, CT)
 
-pt is converted to string and printed.
+converts plaintext to string and prints it
 
-5. Offline Solver (Extract Flag)
+So the flag is obtained by decrypting CT with AES-CBC using:
 
-The following script brute-forces the remaining degrees of freedom (TTL/seq/flags) and prints the decrypted plaintext
-once it contains the expected flag prefix.
+key = derived 16 bytes
 
-Note: This exactly mirrors the binary’s key layout and ciphertext.
+iv = key
 
+7) Offline solver
+
+Below is a clean offline script that mirrors the binary’s CT + key layout.
+It searches remaining degrees of freedom (TTL/seq/flags) until plaintext contains CMO{.
+```
 #!/usr/bin/env python3
-import struct
+from __future__ import annotations
 
 try:
     from Crypto.Cipher import AES
+
     def aes_cbc_dec(key: bytes, ct: bytes) -> bytes:
         return AES.new(key, AES.MODE_CBC, iv=key).decrypt(ct)
+
 except ImportError:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
     def aes_cbc_dec(key: bytes, ct: bytes) -> bytes:
         c = Cipher(algorithms.AES(key), modes.CBC(key))
         d = c.decryptor()
         return d.update(ct) + d.finalize()
+
 
 CT = bytes([
     0x51, 0xF1, 0xA5, 0x29, 0xB4, 0xDF, 0x7E, 0xC0,
@@ -127,15 +278,18 @@ MAGIC = 0xE55FDEC6
 UPPER16 = (MAGIC >> 16) & 0xFFFF
 LOWER16 = MAGIC & 0xFFFF
 
+
 def bswap16(x: int) -> int:
     return ((x & 0xFF) << 8) | ((x >> 8) & 0xFF)
 
+
 def icmp_checksum(seq: int) -> int:
-    # Echo Request checksum over 16-bit words (layout used by the challenge)
+    # ICMP Echo checksum over the word layout used by the challenge
     s = 0x0800 + 0x3713 + (seq & 0xFFFF) + 0xC6DE + 0x5FE5
     while s > 0xFFFF:
         s = (s & 0xFFFF) + (s >> 16)
     return (~s) & 0xFFFF
+
 
 def build_key(flags_hi: int, flags_lo: int, ttl: int, seq: int) -> bytes:
     ck = icmp_checksum(seq)
@@ -150,12 +304,13 @@ def build_key(flags_hi: int, flags_lo: int, ttl: int, seq: int) -> bytes:
         xa & 0xFF, (xa >> 8) & 0xFF,
         flags_hi & 0xFF, flags_lo & 0xFF, ttl & 0xFF, 0x01,  # proto=ICMP
         ck_b0, ck_b1,
-        0xC6, 0xDE, 0x5F, 0xE5,  # MAGIC (little-endian)
-        0x37, 0x13,              # ICMP ID (little-endian)
+        0xC6, 0xDE, 0x5F, 0xE5,  # MAGIC little-endian
+        0x37, 0x13,              # ICMP ID little-endian
         xb & 0xFF, (xb >> 8) & 0xFF,
     ])
 
-def main():
+
+def main() -> None:
     flag_opts = [(0x00, 0x00), (0x40, 0x00)]  # no DF vs DF
 
     for fh, fl in flag_opts:
@@ -168,22 +323,31 @@ def main():
                     print("flags/frag =", hex((fh << 8) | fl), "ttl =", ttl, "seq =", seq)
                     print("key =", key.hex())
                     print("plaintext =", pt)
-                    try:
-                        print("plaintext_str =", pt.decode("utf-8", errors="replace"))
-                    except Exception:
-                        pass
+                    print("plaintext_str =", pt.decode("utf-8", errors="replace"))
                     return
 
     print("not found")
 
+
 if __name__ == "__main__":
     main()
-6. Notes / Takeaways
+```
+8) What to remember for similar challenges
 
-Don’t be distracted by benign-looking services (the HTTP server here is a decoy).
+Start with file: platform mismatch explains many “weird” runtime errors.
 
-In Go malware-like CTF binaries, the “real” logic often lives in init() paths.
+Identify decoys (banner / HTTP server) and confirm whether they matter.
 
-Use high-signal anchors (pcap, exec, crypto) + XREF backtracking to quickly land on the payload.
+Use high-signal anchors:
 
-Once the trigger condition and key layout are recovered, an offline solver is usually the cleanest way to extract the flag.
+pcap / BPF → sniffers
+
+aes / cbc / rsa → crypto payloads
+
+exec / filesystem writes → persistence / execution
+
+Backtrack with XREF from rare/high-level APIs (e.g., NewCBCDecrypter) into the true logic.
+
+Translate assembly stores into data layouts (key[offset] = ...) for exact reproduction.
+
+Write an offline solver: stable, reproducible, GitHub-friendly.
