@@ -15,10 +15,8 @@ We are given:
 
 ### 0.2 Identify platform
 
-```bash
-file httpd
 
-Observed traits:
+By running file httpd, we observerd:
 
 ELF 64-bit for FreeBSD
 
@@ -26,8 +24,7 @@ interpreter: /libexec/ld-elf.so.1
 
 Go BuildID + debug_info, not stripped
 
-0.3 Why Linux says “No such file or directory”
-
+### 0.3 Why cannot run
 On Linux, running it gives:
 
 zsh: no such file or directory
@@ -38,8 +35,8 @@ This is a classic wrong-ABI symptom: Linux can’t execute a FreeBSD ELF, and th
 
 ✅ Conclusion: Start with static analysis (Ghidra). Optionally run it later in a FreeBSD VM.
 
-1) First look in Ghidra: find the “obvious behavior”
-1.1 Locate main.main
+## 1) First look in Ghidra: find the “obvious behavior”
+### 1.1 Locate main.main
 
 Because it’s Go with debug info, you usually get useful names:
 
@@ -49,7 +46,7 @@ main.handler
 
 many init functions
 
-1.2 A tiny HTTP server
+### 1.2 A tiny HTTP server
 
 We quickly spot:
 
@@ -61,7 +58,7 @@ prints Starting server...
 
 At this stage it looks like a toy web server.
 
-1.3 The handler is boring
+### 1.3 The handler is boring
 
 main.handler(ResponseWriter, *Request) is also simple:
 
@@ -73,7 +70,7 @@ else: http.Error(...)
 
 So: where’s the real payload?
 
-2) Don’t brute-force runtime.newproc: use high-signal anchors
+## 2) Don’t brute-force runtime.newproc: use high-signal anchors
 
 In Go binaries, scanning runtime.newproc is noisy (stdlib spawns goroutines everywhere).
 
@@ -92,8 +89,8 @@ decrypting only after a trigger packet
 
 So we focus on pcap + crypto.
 
-3) Backtrack via crypto: find the real logic
-3.1 Pick “rare” crypto APIs
+## 3) Backtrack via crypto: find the real logic
+### 3.1 Pick “rare” crypto APIs
 
 AES internals like aesCipher.Encrypt are too generic.
 
@@ -105,7 +102,7 @@ crypto/cipher.NewCBCDecrypter
 
 crypto/cipher.(*cbcDecrypter).CryptBlocks
 
-3.2 XREF NewCBCDecrypter
+### 3.2 XREF NewCBCDecrypter
 
 In Ghidra:
 
@@ -127,8 +124,8 @@ prints the plaintext
 
 ✅ This is the real payload.
 
-4) Payload overview: sniff → match → derive key → decrypt → print
-4.1 Packet capture setup (pcap)
+## 4) Payload overview: sniff → match → derive key → decrypt → print
+### 4.1 Packet capture setup (pcap)
 
 Inside the init-like function:
 
@@ -148,7 +145,7 @@ uses chanrecv2 loop to receive packets
 
 So: it’s a live sniffer.
 
-4.2 Trigger conditions (raw offsets)
+### 4.2 Trigger conditions (raw offsets)
 
 Before decrypting, it checks fixed offsets in the raw packet buffer (Ethernet + IPv4 assumed). Key checks:
 
@@ -166,31 +163,31 @@ magic value inside ICMP data
 
 Only if all are satisfied does the program proceed to decryption.
 
-5) Extract the ciphertext (CT)
+## 5) Extract the ciphertext (CT)
 
 The code allocates a 32-byte buffer and fills it with four 64-bit constants.
 
 Interpreting those qwords as little-endian bytes yields:
-
+```
 CT = bytes([
     0x51, 0xF1, 0xA5, 0x29, 0xB4, 0xDF, 0x7E, 0xC0,
     0x2A, 0x3B, 0x2F, 0x8F, 0x24, 0x3D, 0x4E, 0xB3,
     0x5A, 0xED, 0xB0, 0xCF, 0x0B, 0x9C, 0xDD, 0x8C,
     0xCD, 0xE6, 0x0E, 0x9B, 0x3E, 0xC4, 0x64, 0x0C
 ])
-
+```
 This is the ciphertext input to AES-CBC.
 
-6) Recover key derivation (exact 16-byte layout)
+## 6) Recover key derivation (exact 16-byte layout)
 
 This part becomes mechanical and beginner-friendly:
 
 When you see assembly stores like MOV [RAX+0x8], EBX, you can map them directly:
-
+```
 key[8:12] = ...
-
+```
 From the stores, key layout is:
-
+```
 key[0:2] = bswap16( upper16(magic) XOR icmp_checksum_le )
 
 key[2:6] = pkt[0x14:0x18] (4 bytes)
@@ -202,24 +199,24 @@ key[8:12] = pkt[0x2a:0x2e] (magic, little-endian)
 key[12:14]= pkt[0x26:0x28] (ICMP id, little-endian)
 
 key[14:16]= bswap16( icmp_checksum_le XOR lower16(magic) )
-
+```
 Then the binary calls:
-
+```
 aes.NewCipher(key)
 
 cipher.NewCBCDecrypter(block, iv) where iv == key
 
 CryptBlocks(pt, CT)
-
+```
 converts plaintext to string and prints it
 
 So the flag is obtained by decrypting CT with AES-CBC using:
-
+```
 key = derived 16 bytes
 
 iv = key
-
-7) Offline solver
+```
+## 7) Offline solver
 
 Below is a clean offline script that mirrors the binary’s CT + key layout.
 It searches remaining degrees of freedom (TTL/seq/flags) until plaintext contains CMO{.
@@ -307,7 +304,7 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
-8) What to remember for similar challenges
+## 8) What to remember for similar challenges
 
 Start with file: platform mismatch explains many “weird” runtime errors.
 
