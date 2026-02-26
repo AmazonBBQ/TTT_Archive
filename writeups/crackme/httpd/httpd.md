@@ -304,22 +304,14 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
-## 8) What to remember for similar challenges
-
-Start with file: platform mismatch explains many “weird” runtime errors.
-
-Identify decoys (banner / HTTP server) and confirm whether they matter.
-
-Use high-signal anchors:
-
-pcap / BPF → sniffers
-
-aes / cbc / rsa → crypto payloads
-
-exec / filesystem writes → persistence / execution
-
-Backtrack with XREF from rare/high-level APIs (e.g., NewCBCDecrypter) into the true logic.
-
-Translate assembly stores into data layouts (key[offset] = ...) for exact reproduction.
+## 8) Flag
+```
+python3 solve.py  
+FOUND!
+flags/frag = 0x4000 ttl = 64 seq = 1
+key = c2c5400040019a27c6de5fe53713f95c
+pt = b'CMO{fUn_w1th_m4g1c_p4ck3t5}\x05\x05\x05\x05\x05'
+pt_str = CMO{fUn_w1th_m4g1c_p4ck3t5}
+```
 
 Write an offline solver: stable, reproducible, GitHub-friendly.
