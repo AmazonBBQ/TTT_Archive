@@ -4,31 +4,6 @@
 
 ---
 
-## Table of Contents
-
-- [0) Recon: what is this binary and why won’t it run?](#0-recon-what-is-this-binary-and-why-wont-it-run)
-  - [0.1 Files](#01-files)
-  - [0.2 Identify platform](#02-identify-platform)
-  - [0.3 Why Linux says “No such file or directory”】【#03-why-linux-says-no-such-file-or-directory)
-- [1) First look in Ghidra: find the “obvious behavior”](#1-first-look-in-ghidra-find-the-obvious-behavior)
-  - [1.1 Locate `main.main`](#11-locate-mainmain)
-  - [1.2 A tiny HTTP server](#12-a-tiny-http-server)
-  - [1.3 The handler is boring](#13-the-handler-is-boring)
-- [2) Don’t brute-force `runtime.newproc`: use high-signal anchors](#2-dont-brute-force-runtimenewproc-use-high-signal-anchors)
-- [3) Backtrack via crypto: find the real logic](#3-backtrack-via-crypto-find-the-real-logic)
-  - [3.1 Pick “rare” crypto APIs](#31-pick-rare-crypto-apis)
-  - [3.2 XREF `NewCBCDecrypter`](#32-xref-newcbcdecrypter)
-- [4) Payload overview: sniff → match → derive key → decrypt → print](#4-payload-overview-sniff--match--derive-key--decrypt--print)
-  - [4.1 Packet capture setup (pcap)](#41-packet-capture-setup-pcap)
-  - [4.2 Trigger conditions (raw offsets)](#42-trigger-conditions-raw-offsets)
-- [5) Extract the ciphertext (CT)](#5-extract-the-ciphertext-ct)
-- [6) Recover key derivation (exact 16-byte layout)](#6-recover-key-derivation-exact-16-byte-layout)
-- [7) Offline solver](#7-offline-solver)
-- [8) What to remember for similar challenges](#8-what-to-remember-for-similar-challenges)
-- [Final note](#final-note)
-
----
-
 ## 0) Recon: what is this binary and why won’t it run?
 
 ### 0.1 Files
