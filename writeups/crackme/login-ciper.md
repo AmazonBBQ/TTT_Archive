@@ -10,7 +10,7 @@ Don't patch it!
 Insert your password:
 ```
 
-Entering an arbitrary value results in `Wrong!`, which suggests that the binary performs some internal transformation before validating the input.
+Entering random value results in `Wrong!`, which suggests that the binary performs some internal transformation before validating the input.
 
 The goal is to reverse the validation logic and recover the correct password.
 
@@ -62,8 +62,6 @@ Notably:
 
 * No calls to `strcmp`, `strncmp`, or `memcmp`.
 * Therefore, the comparison is implemented manually inside the binary.
-
-This is a common crackme pattern where the expected password is generated algorithmically.
 
 ---
 
@@ -138,8 +136,6 @@ So the algorithm is simply:
 ```
 expected[i] = seed[i] - (state_i % 10)
 ```
-
-This is not cryptography — just a deterministic transformation.
 
 ---
 
